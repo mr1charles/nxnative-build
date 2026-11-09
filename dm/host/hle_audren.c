@@ -261,6 +261,12 @@ static uint32_t up_3_2(const int32_t *in, uint32_t n, int32_t *out) {
     memmove(buf, buf + 2 * n, (RS_T - 1) * 8);
     return m;
 }
+static int32_t audio_headroom_q15(void) {   // see the HYPOTHESIS FIX comment below (the 6-channel downmix): cached, read once
+    static int32_t v = -1;
+    if (v < 0) { const char *e = getenv("DM_AUDIO_HEADROOM_Q15"); v = e ? atoi(e) : 16384;
+                 if (v != 32768) LOG("audren: 6-channel downmix headroom %d/32768 (%.2f dB); DM_AUDIO_HEADROOM_Q15=32768 for none (old behavior)", v, 20.0 * log10(v / 32768.0)); }
+    return v;
+}
 static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
     if (len < 0x20) return 0;
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
@@ -311,8 +317,15 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
             static int32_t st[FRAME_MAX * 2];   // the stereo downmix before clamping (capture runs under g_render_mu)
             for (uint32_t s = 0; s < samples; s++) {
                 int32_t l, r;
+                // HYPOTHESIS FIX (unconfirmed, 2026-11-09): dense 6-channel content (all of front/center/LFE/back near full
+                // scale at once, e.g. Super Mario Odyssey's orchestral mix) can sum past int16 range here and hit the hard
+                // clamp below with no headroom, which is audible as crackle/distortion; real hardware's downmix stage
+                // likely has headroom this reimplementation lacks. DM_AUDIO_HEADROOM_Q15 (default 16384 = -6 dB, picked
+                // generous since this is going out untested) scales the 6ch sum before the clamp; =32768 (0 dB) restores
+                // the old behavior exactly, for A/B comparison. Revert this whole block if it didn't help or sounds worse.
                 if (k >= 6) { int64_t c = (int64_t)ch[2][s] * CC + (int64_t)ch[3][s] * CL;
-                              l = (int32_t)(((int64_t)ch[0][s] * CF + c + (int64_t)ch[4][s] * CB) >> 15); r = (int32_t)(((int64_t)ch[1][s] * CF + c + (int64_t)ch[5][s] * CB) >> 15); }
+                              l = (int32_t)((((int64_t)ch[0][s] * CF + c + (int64_t)ch[4][s] * CB) >> 15) * audio_headroom_q15() >> 15);
+                              r = (int32_t)((((int64_t)ch[1][s] * CF + c + (int64_t)ch[5][s] * CB) >> 15) * audio_headroom_q15() >> 15); }
                 else { l = ch[0][s]; r = k > 1 ? ch[1][s] : l; }
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
