@@ -26,15 +26,11 @@ on:
         description: "Diagnostic switches baked into the app, KEY=VALUE separated by semicolons (e.g. DM_HITCH_DUMP=3000:10)"
         type: string
         default: ""
-      to_release:
-        description: "Put the IPA on the 'ipas' release instead of a build artifact (artifact storage can run out; under 2 GB only)"
-        type: boolean
-        default: false
 jobs:
   ipa:
     runs-on: macos-26
     permissions:
-      contents: write
+      contents: read   # this repo is public now; nothing it builds is ever written back here — game data goes to the private nxnative-games repo via GAMES_REPO_TOKEN
     timeout-minutes: 180
     defaults:
       run:
@@ -55,12 +51,13 @@ jobs:
         if: ${{ inputs.build }}
         env:
           PROD_KEYS_B64: ${{ secrets.PROD_KEYS_B64 }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GAMES_REPO_TOKEN }}
         run: |
           test -n "$PROD_KEYS_B64"
+          test -n "$GH_TOKEN" || { echo "::error::GAMES_REPO_TOKEN secret is not set (needed now that this repo is public: the game files live in the private mr1charles/nxnative-games repo, downloaded with a token scoped to just that repo)"; exit 1; }
           echo "$PROD_KEYS_B64" | base64 -d > "$RUNNER_TEMP/prod.keys"
           mkdir -p "$RUNNER_TEMP/game"
-          gh release download "${{ inputs.release }}" -D "$RUNNER_TEMP/game"
+          gh release download "${{ inputs.release }}" -R mr1charles/nxnative-games -D "$RUNNER_TEMP/game"
           if ls "$RUNNER_TEMP"/game/*.part* >/dev/null 2>&1; then
             f=$(ls "$RUNNER_TEMP"/game/*.part00); cat "$RUNNER_TEMP"/game/*.part* > "${f%.part00}"; rm "$RUNNER_TEMP"/game/*.part*
           fi
@@ -86,17 +83,14 @@ jobs:
       - name: Collect IPA
         if: ${{ inputs.build }}
         run: mkdir -p out && cp "$RUNNER_TEMP"/game/*.ipa out/
-      - name: Upload IPA to the release
-        if: ${{ inputs.build && inputs.to_release }}
+      - name: Upload IPA to the private games repo
+        # Built IPAs contain real game data, so they always go to the private mr1charles/nxnative-games repo's
+        # "ipas" release, never this repo's own artifact storage: this repo is public, and both a public repo's
+        # workflow artifacts and its releases are downloadable by anyone, so there is no safe public destination here.
+        if: ${{ inputs.build }}
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload ipas out/*.ipa --clobber -R "$GITHUB_REPOSITORY"
-      - uses: actions/upload-artifact@v4
-        if: ${{ inputs.build && !inputs.to_release }}
-        with:
-          name: ipa
-          path: out/*.ipa
-          retention-days: 3
+          GH_TOKEN: ${{ secrets.GAMES_REPO_TOKEN }}
+        run: gh release upload ipas out/*.ipa --clobber -R mr1charles/nxnative-games
       - uses: actions/upload-artifact@v4
         if: ${{ always() && inputs.build }}
         with:
