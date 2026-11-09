@@ -90,7 +90,17 @@ jobs:
         if: ${{ inputs.build }}
         env:
           GH_TOKEN: ${{ secrets.GAMES_REPO_TOKEN }}
-        run: gh release upload ipas out/*.ipa --clobber -R mr1charles/nxnative-games
+        run: |
+          f=$(ls out/*.ipa); sz=$(stat -f%z "$f")
+          if [ "$sz" -ge 1900000000 ]; then   # GitHub release assets cap at 2 GiB; split large IPAs like the NSP fetch step joins *.partNN
+            echo "IPA is $sz bytes, over the 2 GiB release-asset limit: splitting into parts"
+            rm -f out/*.part*; split -b 1800m "$f" "$f.part"
+            i=0; for p in "$f".part*; do mv "$p" "$f.part$(printf '%02d' $i)"; i=$((i+1)); done
+            rm -f "$f"
+            gh release upload ipas "$f".part* --clobber -R mr1charles/nxnative-games
+          else
+            gh release upload ipas "$f" --clobber -R mr1charles/nxnative-games
+          fi
       - uses: actions/upload-artifact@v4
         if: ${{ always() && inputs.build }}
         with:
