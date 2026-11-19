@@ -4345,6 +4345,10 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.mipFilter = p.minf <= 1 ? MTLSamplerMipFilterNotMipmapped : (p.minf == 2 || p.minf == 3) ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
+    // Texture quality (DM_TEX_LOD 0-4): mipmapped colour samplers start this many mip levels down, so a texture is sampled at 1/2, 1/4, ... of its size (less bandwidth, softer picture).
+    // Memory use is unchanged (the full textures stay resident). Compare (shadow) and min/max reduction samplers keep their levels: depth pyramids and shadow maps must stay exact
+    { static int tl = -1; if (tl < 0) { const char *e = getenv("DM_TEX_LOD"); tl = e ? atoi(e) : 0; if (tl < 0) tl = 0; if (tl > 4) tl = 4; if (tl) MLOG("DM_TEX_LOD=%d: texture sampling starts %d mip level(s) down", tl, tl); }
+      if (tl && d.mipFilter != MTLSamplerMipFilterNotMipmapped && !p.cmp_mode && !p.reduction) { float m = d.lodMinClamp < tl ? (float)tl : d.lodMinClamp; d.lodMinClamp = m > d.lodMaxClamp ? d.lodMaxClamp : m; } }
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
@@ -9734,7 +9738,7 @@ static const char *cctx_snap(void) {
 // When the game itself asks for 30 fps (pacing by the game's present interval, interval 2, hle_nvn.c) the display link runs at 30 Hz too: games whose logic counts frames, such as Engage, are not pulled up to 60 fps by the display link on iOS
 __attribute__((weak)) int nvn_game_fps(void) { return 60; }   // hle_nvn.c provides the strong definition
 int mtl_fps_target(void) { static int env = -2; if (env == -2) { const char *e = getenv("DM_FPS"); env = e ? atoi(e) : -1; if (env != 30 && env != 60) env = -1; else MLOG("DM_FPS=%d: frame rate pinned by the test switch", env); }
-    return env > 0 ? env : nvn_game_fps() == 30 ? 30 : 60; }
+    int g = nvn_game_fps(); return env > 0 ? env : g == 15 || g == 20 || g == 30 ? g : 60; }
 // Hand a submission to the GPU in segments (DM_NVN_CUT=draw count, 0 = off; default 64): when the game holds back the next frame's submit until this frame's GPU work is done (The Legend of Zelda: Breath of the Wild: the main thread's nvnSyncWait on the fence of the frame just submitted),
 // the GPU sits idle for the milliseconds the host spends translating inside the submit (in the shrine each frame is GPU 13 ms + translation 7 ms back to back). Each time this many draws have accumulated, the command buffer encoded so far is committed between two passes: the GPU runs the earlier passes while the CPU translates the later ones.
 // Cut only when no encoder is open and no pass is deferred / merged / hoisted; commit this batch's uploads first (later draws use them). The fence signal and completion work stay on the last segment only: the queue executes in commit order and every encoder starts with a queue barrier

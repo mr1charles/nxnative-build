@@ -1621,7 +1621,7 @@ static int fps_present_cap(void) {
     if (dm_fps_state) return fps_step_cap();
     if (g_present_cap < 0) {
         const char *e=getenv("DM_FPS_TARGET");int t=e?atoi(e):DM_GAME_FPS_TARGET;
-        g_present_cap=t==30||t==60?t:0;
+        g_present_cap=t==15||t==20||t==30||t==60?t:0;   // 15 / 20 fps: the interval 60 / c in present_itv is 4 / 3 vsyncs
     }
     return g_present_cap;
 }

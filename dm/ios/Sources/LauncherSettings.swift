@@ -87,13 +87,13 @@ final class LauncherModel: ObservableObject {
     // Graphics presets: each lists the values it gives the settings this game has (a setting the game lacks, an env file fixed, or a value the game does not offer is skipped).
     // "high" is the tested defaults: each setting goes back to its own default. Presets only move rows on the screen; the player can change any row afterwards
     static let presets: [String: [(String, String)]] = [
-        "verylow": [("DM_FPS_TARGET", "30"), ("DM_RENDER_SCALE", "0.50"), ("DM_DYNAMIC_RESOLUTION", "1"), ("DM_PRESENT_UPSCALE", "off")],
-        "low":     [("DM_FPS_TARGET", "30"), ("DM_RENDER_SCALE", "0.70"), ("DM_DYNAMIC_RESOLUTION", "1"), ("DM_PRESENT_UPSCALE", "off")],
-        "medium":  [("DM_FPS_TARGET", "60"), ("DM_RENDER_SCALE", "0.85"), ("DM_DYNAMIC_RESOLUTION", "1"), ("DM_PRESENT_UPSCALE", "off")],
+        "verylow": [("DM_FPS_TARGET", "30"), ("DM_RENDER_SCALE", "0.50"), ("DM_TEX_LOD", "3"), ("DM_DYNAMIC_RESOLUTION", "1"), ("DM_PRESENT_UPSCALE", "off")],
+        "low":     [("DM_FPS_TARGET", "30"), ("DM_RENDER_SCALE", "0.70"), ("DM_TEX_LOD", "2"), ("DM_DYNAMIC_RESOLUTION", "1"), ("DM_PRESENT_UPSCALE", "off")],
+        "medium":  [("DM_FPS_TARGET", "60"), ("DM_RENDER_SCALE", "0.85"), ("DM_TEX_LOD", "1"), ("DM_DYNAMIC_RESOLUTION", "1"), ("DM_PRESENT_UPSCALE", "off")],
     ]
     func applyPreset(_ name: String) {
         let wanted = Self.presets[name]
-        for env in ["DM_FPS_TARGET", "DM_RENDER_SCALE", "DM_DYNAMIC_RESOLUTION", "DM_PRESENT_UPSCALE"] {
+        for env in ["DM_FPS_TARGET", "DM_RENDER_SCALE", "DM_TEX_LOD", "DM_DYNAMIC_RESOLUTION", "DM_PRESENT_UPSCALE"] {
             guard let s = settings.first(where: { $0.env == env }), !fixed.contains(env) else { continue }
             let v = wanted?.first(where: { $0.0 == env })?.1 ?? s.def
             if s.accepts(v) { values[env] = v }
