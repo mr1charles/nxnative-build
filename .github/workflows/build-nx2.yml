@@ -28,7 +28,9 @@ on:
         default: ""
 jobs:
   ipa:
-    runs-on: macos-26
+    runs-on: xcode-27   # the engine calls Metal 4 upscaler properties only Xcode 27's SDK has (macos-26 has Xcode 26.6: 'property reactiveMaskTextureUsage not found')
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     permissions:
       contents: read   # this repo is public now; nothing it builds is ever written back here — game data goes to the private nxnative-games repo via GAMES_REPO_TOKEN
     timeout-minutes: 180
