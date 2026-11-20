@@ -1,8 +1,16 @@
 diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
-index dd3910d..5696925 100755
+index dd3910d..c6438f9 100755
 --- a/scripts/build_ipa_from_nsp.py
 +++ b/scripts/build_ipa_from_nsp.py
-@@ -1231,6 +1231,7 @@ def write_profile(pdir, app, f):
+@@ -1220,6 +1220,7 @@ def write_profile(pdir, app, f):
+     store = sorted(e for e, b in R['extb'].items() if e and R['exts'][e] and (b / R['exts'][e] >= 1 << 20 or 2 * R['extc'][e] >= R['exts'][e]))
+     name = f['name'] or f'{app:016X}'
+     mods = G['modules'][0].split()
++    for kv in filter(None, os.environ.get('NX_PROFILE_ROWS', '').split(';')): k, v = kv.split('=', 1); G[k] = (v, 'set by NX_PROFILE_ROWS')   # nxnative-build: keys a build without the heap check needs
+     T = '\t'
+     def key(k, default=None):   # a key with the reason profile_guess.py gives for it above it; None when neither the guess nor a default has one
+         v, why = G[k] if k in G else (default, '')
+@@ -1231,6 +1232,7 @@ def write_profile(pdir, app, f):
           '# ---- Identity ----', f'title_id{T}{app:016X}', f'program_id{T}{(F["program"] or app):016X}', '',
           '# ---- App ----', f'name{T}{name}', f'ipa{T}{ipa_name(name, app)}', f'app_category{T}public.app-category.games', *key('pad_layout'), *key('op_mode'), '',
           '# ---- Versions ----', T.join(['build', f['version'], f['display']] + [f'{m}={F["mods"][m]["bid"]}' for m in mods]), f'package{T}{f["version"]}', f'shader_versions{T}{f["version"]}', '',

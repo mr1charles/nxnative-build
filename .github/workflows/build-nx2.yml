@@ -22,6 +22,10 @@ on:
         description: "Title ID to put in the joined file's name (for a dump without a ticket or a [title ID] in its name)"
         type: string
         default: ""
+      profile_rows:
+        description: "Provisional profile keys, KEY=VALUE separated by semicolons (e.g. mem_alias=0x40000000;app_pool=0xd8000000)"
+        type: string
+        default: ""
       env_lines:
         description: "Diagnostic switches baked into the app, KEY=VALUE separated by semicolons (e.g. DM_HITCH_DUMP=3000:10)"
         type: string
@@ -85,6 +89,7 @@ jobs:
         env:
           NX_APP_POOL: ${{ inputs.app_pool }}
           NX_OP_MODE: ${{ inputs.op_mode }}
+          NX_PROFILE_ROWS: ${{ inputs.profile_rows }}
           ENV_LINES: ${{ inputs.env_lines }}
         run: |
           EXTRA=()
