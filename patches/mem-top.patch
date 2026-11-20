@@ -1,8 +1,27 @@
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index e48a379..f9735b9 100644
+index e48a379..90b9adb 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -5628,7 +5628,17 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
+@@ -729,6 +729,18 @@ static void res_top(const char *why) { @autoreleasepool {
+         else if ([o conformsToProtocol:@protocol(MTLHeap)]) MLOG("  heap: %llu MB", (unsigned long long)(((id<MTLHeap>)o).size >> 20));
+         else { id<MTLBuffer> b = o; int sh = b.storageMode == MTLStorageModeShared; MLOG("  buffer %p+%#lx (%s): %llu MB", sh ? b.contents : NULL, (unsigned long)b.length, sh ? "shared" : "private", (unsigned long long)(b.allocatedSize >> 20)); } }
+ } }
++// DM_MEM_TOP: the residency set's textures grouped by format, size, levels and usage: the count and megabytes of each of the 16 groups that take most
++static void res_hist(const char *why) { @autoreleasepool {
++    enum { G = 512 }; static struct { uint64_t key; unsigned n; uint64_t mb; unsigned w, h, l, pf, rt; } g[G]; int ng = 0; memset(g, 0, sizeof g);
++    pthread_mutex_lock(&g_res_mu);
++    for (id<MTLAllocation> o in g_res_objects.allObjects) { if (![(id)o conformsToProtocol:@protocol(MTLTexture)]) continue; id<MTLTexture> t = o;
++        unsigned rt = (t.usage & MTLTextureUsageRenderTarget) ? 1 : 0; uint64_t key = ((uint64_t)t.pixelFormat << 48) ^ ((uint64_t)t.width << 32) ^ ((uint64_t)t.height << 16) ^ ((uint64_t)t.mipmapLevelCount << 8) ^ rt ^ ((uint64_t)t.arrayLength << 56);
++        int i = 0; while (i < ng && g[i].key != key) i++; if (i == ng) { if (ng == G) continue; ng++; g[i].key = key; g[i].w = (unsigned)t.width; g[i].h = (unsigned)t.height; g[i].l = (unsigned)t.mipmapLevelCount; g[i].pf = (unsigned)t.pixelFormat; g[i].rt = rt; }
++        g[i].n++; g[i].mb += t.allocatedSize; }
++    pthread_mutex_unlock(&g_res_mu);
++    for (int k = 0; k < 16; k++) { int b = -1; uint64_t bm = 0; for (int i = 0; i < ng; i++) if (g[i].n && g[i].mb > bm) { bm = g[i].mb; b = i; }
++        if (b < 0) break; MLOG("%s: texture group %ux%u pf %u levels %u%s x%u = %llu MB", why, g[b].w, g[b].h, g[b].pf, g[b].l, g[b].rt ? " rendertarget" : "", g[b].n, (unsigned long long)(g[b].mb >> 20)); g[b].n = 0; }
++} }
+ void mem_census(const char *why);
+ void dm_gfx_restop(void) { res_top("DM_CTL restop"); mem_census("DM_CTL restop"); }
+ // Going on helps nobody once command buffers keep failing: no frame reaches the window, and each attempt asks the driver to wire more. A host left running like that on a 16 GB Mac took the whole
+@@ -5628,7 +5640,17 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
  // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
  // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
  static _Atomic uint64_t g_gptr_bindings, g_gptr_reads, g_gptr_added, g_gptr_bytes;   // gmem_discover: bindings with sources, readable words, newly addressed logical pool/run ranges and bytes
@@ -12,7 +31,7 @@ index e48a379..f9735b9 100644
 +    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
 +        uint64_t last = g_dev.currentAllocatedSize; int n = 0;
 +        for (;;) { usleep(250000); uint64_t now = g_dev.currentAllocatedSize;
-+            if (now > last + (128ull << 20) && n < 24) { n++; MLOG("memory jump: GPU allocated %llu -> %llu MB", (unsigned long long)(last >> 20), (unsigned long long)(now >> 20)); res_top("memory jump"); }
++            if (now > last + (128ull << 20) && n < 24) { n++; MLOG("memory jump: GPU allocated %llu -> %llu MB", (unsigned long long)(last >> 20), (unsigned long long)(now >> 20)); res_top("memory jump"); res_hist("memory jump"); }
 +            last = now; } });
 +}
  void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
@@ -20,11 +39,11 @@ index e48a379..f9735b9 100644
      static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
      unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
      if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
-@@ -5649,6 +5659,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
+@@ -5649,6 +5671,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
  #endif
      MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u kept by the sharing table alone, %llu MB, %llu MB of it drawn into or shader-written, the oldest idle %llu submissions; evicted with pools %llu (serial entries that went with them %llu), on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (alive %llu, %llu MB; released when idle %llu, %llu MB in total), finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, au.entries, (unsigned long long)(au.bytes >> 20), (unsigned long long)(au.writable_bytes >> 20), (unsigned long long)au.oldest_idle, (unsigned long long)as.evicted, (unsigned long long)as.pool_entries, (unsigned long long)as.taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)g_arena_live, (unsigned long long)(g_arena_live_bytes >> 20), (unsigned long long)g_arena_freed, (unsigned long long)(g_arena_freed_bytes >> 20), nghost, (unsigned long long)ghost_puts, nwait,
           (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), avail);
-+    { static int top_n; if (getenv("DM_MEM_TOP") && top_n++ < 60) res_top("memory top"); }
++    { static int top_n; if (getenv("DM_MEM_TOP") && top_n++ < 60) res_top("memory top"); res_hist("memory top"); }
      { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
        mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
        MLOG("texture views by Metal texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
