@@ -1,0 +1,108 @@
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index e48a379..f9c1d3e 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -3350,6 +3350,19 @@ static int tex_view_to_mtl(uint32_t format, uint32_t *pf, uint8_t swz[4]) {
+     if (g_bc_cpu && pf && nvn_bc_unpacked(format, &unpacked, &bpp)) *pf = unpacked;
+     return mapped;
+ }
++int nvn_sparse_pool(const void *pool);
++// DM_BC_SKIP_MIPS=n: a 2D BC texture decoded on the CPU (g_bc_cpu) is 4-8x bigger than its blocks; its n finest levels are not kept while the first kept level stays >= DM_BC_SKIP_MIN
++// (default 1024) wide or tall. The Metal texture then holds NVN levels k.. as its levels 0.. (views: tex_level_shift; uploads and copies: level - k). 0 for any other texture.
++static unsigned bc_skip_k(const tex_t *t) {
++    static int skip = -1, smin = 1024;
++    if (skip < 0) { const char *e = getenv("DM_BC_SKIP_MIPS"), *m = getenv("DM_BC_SKIP_MIN"); skip = e ? atoi(e) : 0; if (m && atoi(m) > 0) smin = atoi(m); if (skip > 0) MLOG("BC texture mip skip: %d level(s) of textures >= %d", skip, smin); }
++    uint32_t u = 0; int bpp = 0;
++    if (skip <= 0 || !g_bc_cpu || t->d.target != 1 || !nvn_bc_unpacked(t->d.format, &u, &bpp)) return 0;
++    if ((t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || (t->pool && nvn_sparse_pool(t->pool))) return 0;
++    uint32_t big = MAX(t->d.width, t->d.height); unsigned k = 0;
++    while ((int)k < skip && k + 1 < t->d.levels && (big >> k) >= (uint32_t)smin) k++;
++    return k;
++}
+ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
+     uint32_t pf = 0; uint8_t swz[4];
+     // A BC format on a GPU without BC support: create the texture in the uncompressed format the
+@@ -3364,6 +3377,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
+     d.pixelFormat = (MTLPixelFormat)pf;
+     d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
+     d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
++    { unsigned k = bc_skip_k(t); if (k) { d.width = MAX(d.width >> k, 1u); d.height = MAX(d.height >> k, 1u); d.mipmapLevelCount -= k; } }
+     switch (t->d.target) {
+         // 1D / 1D array are created as one-row 2D / 2D array textures: translated shaders never declare texture1d (0 in all five games' libraries) and always sample them as 2D; a Metal 1D texture bound to a texture2d argument is a type mismatch with undefined reads.
+         // Super Mario 3D World + Bowser's Fury's material shaders sample 64x1 R32F 1D lookup tables heavily every frame (on Maxwell a 2D sample of a 1D texture reads that one row)
+@@ -4059,6 +4073,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
+     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
+     uint32_t bc_pf = 0; int bc_bpp = 0;
+     int bc_cpu = g_bc_cpu && nvn_bc_unpacked(t->d.format, &bc_pf, &bc_bpp);
++    unsigned bck = bc_cpu ? bc_skip_k(t) : 0;   // NVN levels below it are not kept (bc_skip_k)
+     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // linear storage no view could take (linear_fit): its rows are copied on the CPU
+     int direct = !bc_cpu && !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
+     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+@@ -4079,7 +4094,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
+     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
+     // Taken after the stamp and the protect: a write that lands from here on faults and is found at the next look
+     uint8_t *need = NULL; unsigned nimg = (unsigned)d.mipmapLevelCount * layers, nup = 0;
+-    if (prev && prev != mt && stamp && !sparse && !linear && bpb && d.sampleCount <= 1 && prev.pixelFormat == mt.pixelFormat && prev.textureType == mt.textureType && prev.sampleCount == mt.sampleCount
++    if (prev && prev != mt && stamp && !sparse && !linear && !bck && bpb && d.sampleCount <= 1 && prev.pixelFormat == mt.pixelFormat && prev.textureType == mt.textureType && prev.sampleCount == mt.sampleCount
+         && prev.width == mt.width && prev.height == mt.height && prev.depth == mt.depth && prev.arrayLength == mt.arrayLength && prev.mipmapLevelCount == mt.mipmapLevelCount)
+         need = pkg_written(t, span, since, (unsigned)d.mipmapLevelCount, layers, &nup);
+     if (need && nup == nimg) { free(need); need = NULL; }
+@@ -4184,7 +4199,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
+     if (bc_cpu) {
+         total_bc = 0;
+         for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+-            uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
++            uint32_t w = MAX(t->d.width >> (l + bck), 1u), h = MAX(t->d.height >> (l + bck), 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
+             unsigned n = layers; if (need) { n = 0; for (unsigned y = 0; y < layers; y++) n += need[l * layers + y]; }
+             total_bc += (size_t)w * h * z * n * (size_t)bc_bpp;
+         }
+@@ -4197,14 +4212,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
+     // CPU-side scratch for the compressed block data when bc_cpu (one level-slice at a time)
+     uint8_t *bc_tmp = NULL; size_t bc_tmp_sz = 0;
+     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+-        uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
++        uint32_t w, h, z; tex_lsize(t, l + bck, &w, &h, &z);
+         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
+         for (unsigned y = 0; y < layers; y++) {
+             if (need && !need[l * layers + y]) { up_copy_add(prev, MTLSizeMake(w, h, z), mt, y, l); continue; }
+             if (bc_cpu) {
+                 size_t bc_need = pitch * rows * z;
+                 if (bc_need > bc_tmp_sz) { free(bc_tmp); bc_tmp = malloc(bc_need); bc_tmp_sz = bc_need; if (!bc_tmp) MDIE("BC decode scratch of %zu bytes failed", bc_need); }
+-                if (nvn_deswizzle(&t->d, l, y, src, bc_tmp, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
++                if (nvn_deswizzle(&t->d, l + bck, y, src, bc_tmp, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
+                 size_t dst_pitch = (size_t)w * bc_bpp;
+                 for (uint32_t zz = 0; zz < z; zz++)
+                     nvn_bc_decode_par(t->d.format, bc_tmp + (size_t)zz * pitch * rows, pitch, w, h,
+@@ -5351,6 +5366,7 @@ static id<MTLTexture> tex_made(const tex_t *t) {
+ // The NVN level that level 0 of base, the host texture tex_made or tex_mtl gave for t, stands for: a sparse texture whose finer levels are not mapped is bound as the view of its levels
+ // from the first mapped one on (sparse_view), so NVN level l is that view's level l - vbase. 0 for every other texture
+ static unsigned tex_level_shift(const tex_t *t, id<MTLTexture> base) {
++    unsigned bk = bc_skip_k(t); if (bk) return bk;   // the finest levels were never made (bc_skip_k)
+     id have = tex_get(t->serial);
+     if (![have isKindOfClass:[NvPkg class]]) return 0;
+     NvPkg *pk = have; return pk->view && pk->view == base ? (unsigned)pk->vbase : 0;
+@@ -5358,7 +5374,7 @@ static unsigned tex_level_shift(const tex_t *t, id<MTLTexture> base) {
+ // The host texture for a copy or a clear, which names its levels as NVN does: a sparse texture bound from a coarser level (sparse_view) is copied through the texture its view is of, all
+ // of its levels. Through the view, a copy into level 0 of a texture bound from level 1 went to level 1, and gsb_store found a host texture narrower than the texture (Densha de GO!!
+ // Hashiro Yamanote Line streams the finer levels of its sparse ASTC textures in by copies, GitHub #2350)
+-static id<MTLTexture> tex_mtl_all(const tex_t *t) { id<MTLTexture> mt = tex_mtl_replay(t); return mt && tex_level_shift(t, mt) ? mt.parentTexture : mt; }
++static id<MTLTexture> tex_mtl_all(const tex_t *t) { id<MTLTexture> mt = tex_mtl_replay(t); return mt && !bc_skip_k(t) && tex_level_shift(t, mt) ? mt.parentTexture : mt; }
+ // NVN formats whose Metal format is the other one of an sRGB / linear pair (g_pfv_srgb) of a format's Metal format: up to 4, zero-terminated (an RGBA8 texture has RGBA8_SRGB and RGBX8_SRGB)
+ static const uint8_t *srgb_twins(uint32_t f) {
+     static uint8_t tw[256][5] __attribute__((section("__DATA,__dm_keep")));
+@@ -16922,6 +16938,7 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
+     tex_t pair; int paired = bcp_before(c->tex, t, &pair);   // a side of a compressed-alias pair: filled first, the copied region goes into its other side after
+     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
+     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
++    { unsigned bk = bc_skip_k(c->tex); if (bk) { if (level < bk) return; level -= bk; } }   // a level the texture does not keep (bc_skip_k): nothing to copy to
+     if (!tex_level_ok(t, level, "buffer-to-texture copy")) return;
+     const p_copy_strides *cs = copy_strides(c, size); int64_t rs = cs ? cs->row : S.copy_stride, is = cs ? cs->image : S.copy_img_stride;   // S: OP_COPY_STRIDE of an older capture
+     size_t row = rs ? (size_t)rs : (size_t)((c->r.width + bw - 1) / bw) * bpb;
+@@ -17372,6 +17389,7 @@ static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
+     if (!s || !c->dst) return nil;
+     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
+     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
++    { unsigned ks = bc_skip_k(c->src), kd = bc_skip_k(c->dst); if (sl < ks || dl < kd) return nil; sl -= ks; dl -= kd; }   // levels a BC texture does not keep (bc_skip_k)
+     if (!tex_level_ok(s, sl, "texture copy source")) return nil;
+     if (bc_alias_copy(c, s, sl, sz0, dl, dz0)) return nil;   // the destination aliases a compressed texture: the bytes go there, and the alias's own texture is not made (see bc_alias_copy)
+     id<MTLTexture> d = tex_mtl_all(c->dst); sparse_gpu_wrote(c->dst); tu_wrote(d);

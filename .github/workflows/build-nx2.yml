@@ -48,7 +48,7 @@ jobs:
           git clone --depth 1 https://github.com/LNPANDY/NX2Apple.git "$RUNNER_TEMP/nx2"
           cd "$RUNNER_TEMP/nx2" && git log -1 --format=%h && python3 tools/engine.py sync && ls engine | head
           # BC texture decode for GPUs without BC support (iPhone 12, A14): the engine refuses them otherwise
-          cd engine && git apply --whitespace=nowarn "$GITHUB_WORKSPACE/patches/bc-a14.patch" && git status --short | head
+          cd engine && for p in bc-a14 bc-skip-mips; do git apply --whitespace=nowarn "$GITHUB_WORKSPACE/patches/$p.patch" || exit 1; done && git status --short | head
       - name: Machine
         run: |
           uname -m; sw_vers; xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version; df -h / | tail -1
