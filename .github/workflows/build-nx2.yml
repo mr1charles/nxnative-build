@@ -1,0 +1,118 @@
+name: Build IPA with NX2Apple engine
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "Pack the IPA (needs the PROD_KEYS_B64 secret and a release named 'game' holding the NSP). Off = only check the toolchain."
+        type: boolean
+        default: false
+      release:
+        description: "Release holding the game (pieces named *.partNN are joined)"
+        type: string
+        default: game
+      app_pool:
+        description: "Heap size override, hex (e.g. 0x68000000 = about 1.6 GB), for phones that kill big apps"
+        type: string
+        default: ""
+      op_mode:
+        description: "Console mode the game starts on: handheld (lighter) or console; empty keeps the profile's"
+        type: string
+        default: ""
+      title_id:
+        description: "Title ID to put in the joined file's name (for a dump without a ticket or a [title ID] in its name)"
+        type: string
+        default: ""
+      env_lines:
+        description: "Diagnostic switches baked into the app, KEY=VALUE separated by semicolons (e.g. DM_HITCH_DUMP=3000:10)"
+        type: string
+        default: ""
+jobs:
+  ipa:
+    runs-on: macos-26
+    permissions:
+      contents: read   # this repo is public now; nothing it builds is ever written back here — game data goes to the private nxnative-games repo via GAMES_REPO_TOKEN
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: NX2Apple engine
+        run: |
+          git clone --depth 1 https://github.com/LNPANDY/NX2Apple.git "$RUNNER_TEMP/nx2"
+          cd "$RUNNER_TEMP/nx2" && git log -1 --format=%h && python3 tools/engine.py sync && ls engine | head
+      - name: Machine
+        run: |
+          uname -m; sw_vers; xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version; df -h / | tail -1
+          sysctl -n machdep.cpu.brand_string; system_profiler SPDisplaysDataType | grep -iE "chipset|metal" || true
+      - uses: actions/setup-dotnet@v4   # the cask now installs .NET 11; nx_extract needs the 10.0 runtime
+        with:
+          dotnet-version: '10.0.x'
+      - name: Tools
+        run: |
+          brew install xcodegen zstd glslang spirv-cross
+          xcodebuild -downloadComponent MetalToolchain
+          python3 -m pip install --break-system-packages lz4 capstone fonttools zbic nsz "backports.zstd; python_version < '3.14'"
+      - name: Fetch keys and game
+        if: ${{ inputs.build }}
+        env:
+          PROD_KEYS_B64: ${{ secrets.PROD_KEYS_B64 }}
+          GH_TOKEN: ${{ secrets.GAMES_REPO_TOKEN }}
+        run: |
+          test -n "$PROD_KEYS_B64"
+          test -n "$GH_TOKEN" || { echo "::error::GAMES_REPO_TOKEN secret is not set (needed now that this repo is public: the game files live in the private mr1charles/nxnative-games repo, downloaded with a token scoped to just that repo)"; exit 1; }
+          echo "$PROD_KEYS_B64" | base64 -d > "$RUNNER_TEMP/prod.keys"
+          mkdir -p "$RUNNER_TEMP/game"
+          gh release download "${{ inputs.release }}" -R mr1charles/nxnative-games -D "$RUNNER_TEMP/game"
+          if ls "$RUNNER_TEMP"/game/*.part* >/dev/null 2>&1; then
+            f=$(ls "$RUNNER_TEMP"/game/*.part00); cat "$RUNNER_TEMP"/game/*.part* > "${f%.part00}"; rm "$RUNNER_TEMP"/game/*.part*
+          fi
+          for n in "$RUNNER_TEMP"/game/*_????????????????_*.nsp "$RUNNER_TEMP"/game/*_????????????????_*.xci; do   # NAME_<16 hex title ID>_vN.nsp -> "NAME [ID][vN].nsp" (asset names cannot hold brackets)
+            [ -e "$n" ] || continue
+            x="${n##*.}"; b=$(basename "$n" ".$x"); id=$(echo "$b" | grep -oE '[0-9A-Fa-f]{16}' | head -1)
+            mv "$n" "$RUNNER_TEMP/game/${b%%_*} [$id][${b##*_}].$x"
+          done
+          if [ -n "${{ inputs.title_id }}" ]; then
+            for n in "$RUNNER_TEMP"/game/*.nsp; do mv "$n" "$RUNNER_TEMP/game/game [${{ inputs.title_id }}].nsp"; done
+          fi
+          ls -la "$RUNNER_TEMP/game"
+      - name: Pack
+        if: ${{ inputs.build }}
+        env:
+          NX_APP_POOL: ${{ inputs.app_pool }}
+          NX_OP_MODE: ${{ inputs.op_mode }}
+          ENV_LINES: ${{ inputs.env_lines }}
+        run: |
+          EXTRA=()
+          if [ -n "$ENV_LINES" ]; then echo "$ENV_LINES" | tr ';' '\n' > "$RUNNER_TEMP/env.txt"; cat "$RUNNER_TEMP/env.txt"; EXTRA=(--env-file "$RUNNER_TEMP/env.txt"); fi
+          python3 "$RUNNER_TEMP/nx2/engine/scripts/build_ipa_from_nsp.py" "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --no-heap-check --progress lines "${EXTRA[@]}" 2>&1 | tee pack.log
+      - name: Collect IPA
+        if: ${{ inputs.build }}
+        run: mkdir -p out && cp "$RUNNER_TEMP"/game/*.ipa out/
+      - name: Upload IPA to the private games repo
+        # Built IPAs contain real game data, so they always go to the private mr1charles/nxnative-games repo's
+        # "ipas" release, never this repo's own artifact storage: this repo is public, and both a public repo's
+        # workflow artifacts and its releases are downloadable by anyone, so there is no safe public destination here.
+        if: ${{ inputs.build }}
+        env:
+          GH_TOKEN: ${{ secrets.GAMES_REPO_TOKEN }}
+        run: |
+          f=$(ls out/*.ipa); sz=$(stat -f%z "$f")
+          # one release per game and build ("subfolder"): ipa-<game>-<date>-run<N>, so every version stays; nothing is overwritten
+          g=$(basename "$f" .ipa); tag="ipa-nx2-$g-$(date +%Y%m%d)-run${{ github.run_number }}"
+          gh release create "$tag" -R mr1charles/nxnative-games -t "$g build $(date +%Y-%m-%d) (run ${{ github.run_number }})" -n "IPA built by nxnative-build run ${{ github.run_id }}. Parts (*.partNN) are joined with: cat $g.ipa.part* > $g.ipa" || true
+          if [ "$sz" -ge 1900000000 ]; then   # GitHub release assets cap at 2 GiB; split large IPAs like the NSP fetch step joins *.partNN
+            echo "IPA is $sz bytes, over the 2 GiB release-asset limit: splitting into parts"
+            rm -f out/*.part*; split -b 1800m "$f" "$f.part"
+            i=0; for p in "$f".part*; do mv "$p" "$f.part$(printf '%02d' $i)"; i=$((i+1)); done
+            rm -f "$f"
+            gh release upload "$tag" "$f".part* --clobber -R mr1charles/nxnative-games
+          else
+            gh release upload "$tag" "$f" --clobber -R mr1charles/nxnative-games
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && inputs.build }}
+        with:
+          name: pack-log
+          path: pack.log
+          retention-days: 3
